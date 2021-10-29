@@ -8,6 +8,17 @@
 *  OpenMPI section adapted from https://raw.githubusercontent.com/yangxvlin/multiple-sequence-alignment-openMP-openMPI/master/submit/xuliny-seqalkway.cpp.
 */
 
+/*
+* Spartan nodes: (I forgot to record the nodes during the experiments. I'm sorry.)
+* SLURM Parameters:
+*	#SBATCH --partition=physical
+*	#SBATCH --time=0:15:00
+*	#SBATCH --nodes=4
+*	#SBATCH --cpus-per-task=16
+*	#SBATCH --ntasks-per-node=1
+*	#SBATCH --mem=32G
+*/
+
 #include <mpi.h>
 #include <sys/time.h>
 #include <string>
