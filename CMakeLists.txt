@@ -6,6 +6,6 @@ cmake_minimum_required (VERSION 3.8)
 project ("comp90025-project2")
 
 # Add source to this project's executable.
-add_executable (comp90025-project2 "comp90025-project2.cpp" "comp90025-project2.h")
+add_executable (comp90025-project2 "project2.cpp" "project2.h" "test.cpp" "test2.cpp")
 
 # TODO: Add tests and install targets if needed.
