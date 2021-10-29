@@ -3,9 +3,9 @@
 *  COMP90025 S2 2021, Project 2.
 *  CPP program to solve the sequence alignment problem.
 *  Adapted from https://www.geeksforgeeks.org/sequence-alignment-problem/.
-*  Parallelisation using OpenMPI and OpenMP.
-*  Reused OpenMP codes from Project 1.
-*  Hoang Viet Mai, 813361 <vietm@student.unimelb.edu.au>.
+*  Parallelisation using OpenMPI combined with OpenMP.
+*  Reused OpenMP section from Project 1.
+*  OpenMPI section adapted from https://raw.githubusercontent.com/yangxvlin/multiple-sequence-alignment-openMP-openMPI/master/submit/xuliny-seqalkway.cpp.
 */
 
 #include <mpi.h>
@@ -17,21 +17,18 @@
 #include <omp.h>
 #include <cmath>
 #include <queue> 
-using namespace std;
 
-// Length of a given hash string.
-const int HASH_LEN = 128;
+const int HASH_LEN = 128;  // Length of a given hash string.
 
-// Types of message tag for a given MPI routine.
-const int TASK_NONE = -1;
-const int TASK_NEW = 0;
-const int TASK_DONE = 1;
+const int TASK_NEW = 0;    // Indicates new task.
+const int TASK_DONE = 1;   // Indicates task completion.
+const int TASK_NONE = 2;  // Indicates no remaining tasks.
 
 // Represents a given pair-wise alignment.
 struct Task {
 	int probNum;
-	int i; // Index of the first sequence in the genes array.
-	int j; // Index of the second sequence in the genes array.
+	int i;                 // Index of the first sequence in the genes array.
+	int j;                 // Index of the second sequence in the genes array.
 };
 
 // Result of each pair-wise alignment.
@@ -46,7 +43,7 @@ MPI_Datatype createTaskPacket();
 std::string getMinimumPenalties(std::string* genes, int sequencesNum, int mismatchPenalty, int gapPenalty, int* penalties);
 void doSlaveTask();
 int getMinimumPenalty(std::string gene1, std::string gene2, int mismatchPenalty, int gapPenalty, int* gene1Ans, int* gene2Ans);
-Result getResult(std::string gene1, std::string gene2, int probNum, int mismatchPenalty, int gapPenalty);
+Result calculateResult(std::string gene1, std::string gene2, int probNum, int mismatchPenalty, int gapPenalty);
 
 /*
 * Examples of sha512 which returns a std::string
@@ -188,7 +185,7 @@ std::string getMinimumPenalties(std::string* genes, int sequencesNum, int mismat
 	int size;
 	MPI_Comm_size(comm, &size);
 
-	// Broadcast number of sequences, mismatch penalty, and gap penalty to all processes.
+	// Broadcast number of sequences, mismatch penalty, and gap penalty of the given problem instance to all processes.
 	int instanceInfo[3] = { sequencesNum, mismatchPenalty, gapPenalty };
 	MPI_Bcast(instanceInfo, 3, MPI_INT, master, comm);
 
@@ -215,15 +212,17 @@ std::string getMinimumPenalties(std::string* genes, int sequencesNum, int mismat
 	MPI_Datatype taskPacket = createTaskPacket();
 	MPI_Datatype resultPacket = createResultPacket();
 
-	// One thread does task distribution, one thread does alignment.
+	// One thread does task distribution, one thread does the same works as slaves.
 	int probNum = 0;
-	//omp_set_nested(1);
+	Result results[numPairs];
+
 	#pragma omp parallel num_threads(2)
 	{
 		MPI_Status status;
 		if (omp_get_thread_num() == 0) {
+			
 			// Queue tasks.
-			queue<Task> tasks;
+			std::queue<Task> tasks;
 			for (int i = 1; i < sequencesNum; ++i) {
 				for (int j = 0; j < i; ++j) {
 					Task task = { probNum, i, j };
@@ -232,71 +231,79 @@ std::string getMinimumPenalties(std::string* genes, int sequencesNum, int mismat
 				}
 			}
 
-			// Initial task distribution.
+			// One task for each process initially.
 			for (int rank = 0; rank < size; ++rank) {
 
 				if (!tasks.empty()) {
-
 					Task task = tasks.front();
 					MPI_Send(&task, 1, taskPacket, rank, TASK_NEW, comm);
 					tasks.pop();
 				}
-
+				
 				else  {
-					Task task = { TASK_NONE, TASK_NONE, TASK_NONE };
-					MPI_Send(&task, 1, taskPacket, rank, TASK_NEW, comm);
+					Task task;
+					MPI_Send(&task, 1, taskPacket, rank, TASK_NONE, comm);
 				}
 			}
 
-			Result results[numPairs];
-
-			// Continuously distribute the remaining tasks.
+			// Continuously receive results and distribute the remaining tasks.
 			for (int i = 0; i < numPairs; i++) {
+
+				// Receive new results from any process as they come in.
 				Result result{};
-				MPI_Recv(&result, 1, resultPacket, MPI_ANY_SOURCE, TASK_DONE, comm, &status);
+				MPI_Recv(&result, 1, resultPacket, MPI_ANY_SOURCE, MPI_ANY_TAG, comm, &status);
+				
+				if (status.MPI_TAG == TASK_DONE) {
+					results[result.probNum] = result;
+				}
 
-				results[result.probNum] = result;
-
+				// Send the next task to the current process if available.
 				if (!tasks.empty()) {
 					Task task = tasks.front();
 					MPI_Send(&task, 1, taskPacket, status.MPI_SOURCE, TASK_NEW, comm);
 					tasks.pop();
 				}
+
+				// All tasks done.
 				else {
-					Task task = { TASK_NONE, TASK_NONE, TASK_NONE };
-					MPI_Send(&task, 1, taskPacket, status.MPI_SOURCE, TASK_NEW, comm);
+					Task task;
+					MPI_Send(&task, 1, taskPacket, status.MPI_SOURCE, TASK_NONE, comm);
 				}
-			}
-			// Calculate final hash.
-			for (int i = 0; i < numPairs; i++) {
-				penalties[i] = results[i].probPenalty;
-				alignmentHash = sw::sha512::calculate(alignmentHash.append(results[i].probHash));
 			}
 		}
 
 		else {
 			Task task;
-			do {
-				MPI_Recv(&task, 1, taskPacket, master, TASK_NEW, comm, &status);
-				if (task.i == TASK_NONE && task.j == TASK_NONE && task.probNum == TASK_NONE) {
+			while (true) {
 
+				// Receive new task.
+				MPI_Recv(&task, 1, taskPacket, master, MPI_ANY_TAG, comm, &status);
+
+				// All tasks done, exit.
+				if (status.MPI_TAG == TASK_NONE) {
 					break;
 				}
-				Result result = getResult(genes[task.i], genes[task.j], task.probNum, mismatchPenalty, gapPenalty);
+
+				Result result = calculateResult(genes[task.i], genes[task.j], task.probNum, mismatchPenalty, gapPenalty);
 				MPI_Send(&result, 1, resultPacket, master, TASK_DONE, comm);
-			} while (true);
+			}
 		}
+	}
+
+	// Calculate penalties and final hash.
+	for (int i = 0; i < numPairs; i++) {
+		penalties[i] = results[i].probPenalty;
+		alignmentHash = sw::sha512::calculate(alignmentHash.append(results[i].probHash));
 	}
 	return alignmentHash;
 }
 
 void doSlaveTask() {
-	int size;
-	MPI_Comm_size(comm, &size);
 
 	// Receives number of genetic sequences, mismatch penalty, gap penalty of the given problem instance from master.
 	int instanceInfo[3];
 	MPI_Bcast(instanceInfo, 3, MPI_INT, master, comm);
+
 	int sequencesNum = instanceInfo[0];
 	int mismatchPenalty = instanceInfo[1];
 	int gapPenalty = instanceInfo[2];
@@ -306,13 +313,15 @@ void doSlaveTask() {
 	MPI_Bcast(sequence_lengths, sequencesNum, MPI_INT, master, comm);
 
 	// Receive genetic sequences from master.
-	string genes[sequencesNum];
+	std::string genes[sequencesNum];
 	for (int i = 0; i < sequencesNum; i++) {
 		int length = sequence_lengths[i];
 		char sequence_buffer[length + 1];
+
 		MPI_Bcast(sequence_buffer, length, MPI_CHAR, master, comm);
 		sequence_buffer[length] = '\0';
-		genes[i] = string(sequence_buffer, length);
+
+		genes[i] = std::string(sequence_buffer, length);
 	}
 
 	// Create task and result packets.
@@ -323,19 +332,20 @@ void doSlaveTask() {
 
 	// Continuously work until no more tasks are given.
 	Task task;
-	do {
-		MPI_Recv(&task, 1, taskPacket, master, TASK_NEW, comm, &status);
-		if (task.i == TASK_NONE && task.j == TASK_NONE && task.probNum == TASK_NONE) {
+	while (true) {
+		MPI_Recv(&task, 1, taskPacket, master, MPI_ANY_TAG, comm, &status);
+
+		if (status.MPI_TAG == TASK_NONE) {
 			break;
 		}
 
-		Result result = getResult(genes[task.i], genes[task.j], task.probNum, mismatchPenalty, gapPenalty);
+		Result result = calculateResult(genes[task.i], genes[task.j], task.probNum, mismatchPenalty, gapPenalty);
 		MPI_Send(&result, 1, resultPacket, master, TASK_DONE, comm);
-	} while (true);
+	}
 }
 
-// Calculates and returns the result of a given task.
-Result getResult(std::string gene1, std::string gene2, int probNum, int mismatchPenalty, int gapPenalty) {
+// Calculates and returns the result {problem number, penalty, hash} of a given task.
+Result calculateResult(std::string gene1, std::string gene2, int probNum, int mismatchPenalty, int gapPenalty) {
 	int length1 = gene1.length();
 	int length2 = gene2.length();
 	int totalLength = length1 + length2;
@@ -425,30 +435,24 @@ int getMinimumPenalty(std::string gene1, std::string gene2, int mismatchPenalty,
 	for (int traversalNum = 1; traversalNum <= (rows + cols - 1); traversalNum++)
 	{
 		// Column index of the starting cell of the current diagonal traversal.
-		int startCol = max(1, traversalNum - threads + 1);
+		int startCol = std::max(1, traversalNum - threads + 1);
 
 		// Number of cells on the current diagonal traversal.
-		int cells = min(traversalNum, threads);
-
-
+		int cells = std::min(traversalNum, threads);
 
 		omp_set_dynamic(0);
 		omp_set_num_threads(threads);
 
-		/*#pragma omp parallel for schedule(static, 1) ordered*/ // For debug
-
 		// Each thread processes a cell on a different column along the current diagonal so no data-racing.
-#pragma omp parallel for
+		#pragma omp parallel for
 		for (int currentCol = startCol; currentCol <= cells; currentCol++) {
 
 			int rowStart = (currentCol - 1) * blockWidth + 1;
 			int colStart = (traversalNum - currentCol) * blockLength + 1;
 
 			// Prevents out-of-bound traversal.
-			int rowEnd = min(rowStart + blockWidth, rows);
-			int colEnd = min(colStart + blockLength, cols);
-
-
+			int rowEnd = std::min(rowStart + blockWidth, rows);
+			int colEnd = std::min(colStart + blockLength, cols);
 
 			// Start from cell at (currentRow, currentRol), visit its northwest, north, west neighbours.
 			for (int currentRow = rowStart; currentRow < rowEnd; ++currentRow) {
@@ -523,3 +527,6 @@ int getMinimumPenalty(std::string gene1, std::string gene2, int mismatchPenalty,
 
 	return ret;
 }
+
+// mpic++ -fopenmp -O3 -o project2 project2.cp
+// mpiexec -n <number of nodes> /.project2 < <dataset>
